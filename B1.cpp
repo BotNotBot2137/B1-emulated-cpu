@@ -1,10 +1,6 @@
-#include <SMLF/Graphics.hpp>
+#include <iostream>
 
 int main(){
-    SMLF::Window window("SMLF", 255, 255);
-    SMLF::Circle circle(100, 100, 100);
-    circle.setFillColor(SMLF::Color::Red);
-    while (window.isOpen()) {
-    std::cout << "Window open";
+    std::cout << "Hello";
     return 0;
 }
