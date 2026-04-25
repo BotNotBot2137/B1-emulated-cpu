@@ -3,49 +3,131 @@
 #include <algorithm>
 #include <cctype>
 #include <array>
+#include <cstdint>
 
 using namespace std;
 
-struct instuction{
+string Terminal, CurrentCode;
+int rgA = 0, rgB = 0, rgC = 0, pc = 0;
+
+uint8_t fetchOperand(string code, size_t& index){//Gets the next 1 or 2 bytes from memory
+    if (index + 2 < code.length()) {
+        index += 2;
+        string hexByte = code.substr(index, 2);
+        return (uint8_t)stoul(hexByte, nullptr, 16);
+    }
+    return 0;
+}
+
+class Bus{
+public:
+    array<uint8_t, 64 * 1024> cache; //64KB of cashe
+    Bus(){ cache.fill(0);}
+    void write(uint16_t addr, uint8_t data){ cache[addr] = data;}
+    uint8_t read(uint16_t addr){ return cache[addr];}
+};
+
+static array<Bus, 16> busses; //~1Mb 
+static Bus* activeBus = &busses[0];
+
+uint8_t fetchNextByte(){return activeBus->read(pc++);}
+
+struct instruction{
     string_view hex;
     string_view mnemonic;
     void (*action)();
 };
 
-void err(){ cout << "FE(Invalid code)" << endl; }
-void ext(){ cout << "(Exited with code 255[Executed code])" << endl; exit(255); }
+void jmp(){uint16_t high = fetchNextByte();uint16_t low = fetchNextByte();pc = (high << 8)|low;}
+void add(){rgC = rgA + rgB;}
+void min(){rgC = rgA - rgB;}
+void mul(){rgC = rgA * rgB;}
+void div(){rgC = rgA / rgB;}
+void sab(){swap(rgA, rgB);}
+void sac(){swap(rgA, rgC);}
+void cca(){rgB = rgC;}
+void ams(){uint16_t addr = (fetchNextByte() << 8)|fetchNextByte();activeBus->write(addr, rgA);}
+void aml(){uint16_t addr = (fetchNextByte() << 8)|fetchNextByte();rgA = activeBus->read(addr);}
+void lb0(){activeBus = &busses[0];cout << "(lb0)" << endl;}
+void lb1(){activeBus = &busses[1];cout << "(lb1)" << endl;}
+void lb2(){activeBus = &busses[2];cout << "(lb2)" << endl;}
+void ldc(){cout << "(ldc)" << endl;}
+void err(){cout << "FE(Invalid code)" << endl;}
+void ext(){cout << "(Exited with code 255[Executed code])" << endl; exit(255);}
 
-static constexpr array<instuction, 2> instuctions{{ // Table used for adding more instructions in the future. Feel free to modyfy this table, but remember that your emulated code can break.
+static constexpr array<instruction, 16> instructions{{ //Table used for adding more instructions in the future. Feel free to modyfy this table, but remember that your emulated code can break.
     
-    {"FE", "err", &err},
-    {"FF", "ext", &ext},
-
+    {"0F", "jmp", &jmp}, //Jumps to the address in next 2 memory positions
+    {"10", "add", &add}, //Adds registor A and B, into registor 2(A + B = C)
+    {"11", "min", &min}, //Subtracts registor A and B, into registor 2(A - B = C)
+    {"12", "mul", &mul}, //Multiplies registor A and B, into registor 2(A * B = C)
+    {"13", "div", &div}, //Divides registor A and B, into registor 2(A / B = C)
+    {"14", "sab", &sab}, //Swaps registor A and B(A <-> B)
+    {"15", "div", &sac}, //Swaps registor A and C(A <-> C)
+    {"16", "ccb", &cca}, //Clones registor C into B(C -> B)
+    {"17", "ams", &ams}, //Saves registor A into current bus{adress}
+    {"18", "aml", &aml}, //Loads into registor A from current bus{adress}
+    {"B0", "lb0", &lb0}, //Change to bus 0
+    {"B1", "lb1", &lb1}, //Change to bus 1
+    {"B2", "lb2", &lb2}, //Change to bus 2
+    {"FD", "ldc", &ldc}, //Load data from disk to {bus, position}
+    {"FE", "err", &err}, //Error, invalid code (can be included for messing with people)
+    {"FF", "ext", &ext}, //Exit
 }};
 
-string Terminal;
-
-void TerminalF(){ // Main terminal. DO NO MODIFY THIS FUNCTION
-    while (true){
-        cin >> Terminal;
-        transform(Terminal.begin(), Terminal.end(), Terminal.begin(), ::toupper);
-        if (Terminal.length() == 2){
-            bool found = false;
-            for(const auto& inst : instuctions){
-                if (Terminal == inst.hex){
-                    inst.action();
-                    break;
-                }
-            }
-            if (!found){
-                err();
-            }
+void executecode(string Tcur){
+    bool found = false;
+    for(const auto& inst : instructions){
+        if (Tcur == inst.hex){
+            inst.action();
+            found = true;
+            break;
         }
-        else {cout << "(Invalid syntax)" << endl;}
     }
-} 
+    if(!found) err();
+}
+
+void LRram(string code){
+    uint16_t loadAddr = 0;
+    try {for(size_t i = 0;i < code.length();i += 2){
+            string part = code.substr(i, 2);
+            activeBus->write(loadAddr++, (uint8_t)stoul(part, nullptr, 16));
+        } 
+    } catch(...){cout << "(Error: Input contains non-hex characters)" << endl;return;}
+    pc = 0;
+    while(pc < loadAddr){
+        uint8_t byte = fetchNextByte();
+        if (byte == 0xFF) { ext(); break;}
+        char hexstr[3];
+        sprintf(hexstr, "%02X", byte);
+        executecode(hexstr);
+    }
+}
+
+void step(){ //Used for jumping. DO NO MODIFY THIS FUNCTION
+    uint8_t byte = activeBus->read(pc);
+    char hexstr[3];
+    sprintf(hexstr, "%02X", byte);
+    string opcode = hexstr;
+    executecode(hexstr);
+}
+
+void TerminalF(){
+    while(true){
+        getline(cin, Terminal); // Allows spaces in input
+        Terminal.erase(remove(Terminal.begin(), Terminal.end(), ' '), Terminal.end());
+        if(Terminal.empty()) continue;
+        if(Terminal.length() % 2 == 0){
+            transform(Terminal.begin(), Terminal.end(), Terminal.begin(), ::toupper);
+            LRram(Terminal);
+        } else{
+            cout << "(Invalid syntax: Must be even number of hex characters)" << endl;
+        }
+    }
+}
 
 int main(){
-    cout << "(Mesages like this are generated by the emulator.)" << endl;
+    cout << "(Messages like this are generated by the emulator.)" << endl;
     TerminalF();
-    return 0;  
+    return 0;
 }
