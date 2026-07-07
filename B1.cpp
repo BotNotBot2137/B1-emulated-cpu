@@ -1,133 +1,214 @@
-#include <iostream>
-#include <string>
-#include <algorithm>
-#include <cctype>
-#include <array>
-#include <cstdint>
+#include<array>
+#include<cstdint>
+#include<cstdio>
+#include<cstdlib>
 
-using namespace std;
+uint16_t pc = 0x0000, lpc = 0x0000; // The cashe ones, no ram one since its a custom ISO
+uint8_t rA = 0x00, rB = 0x00, rC = 0x00; // Registors
 
-string Terminal, CurrentCode;
-int rgA = 0, rgB = 0, rgC = 0, pc = 0;
+constexpr size_t RAM = 1ull << 24; // 16mb of ram
+uint8_t ram[RAM];
+constexpr size_t I_CASHE = 1ull << 16; // 64kb of istuction cashe
+uint8_t i_cashe[I_CASHE];
+constexpr size_t D_CASHE = 1ull << 8; // 256B of data cashe
+uint8_t d_cashe[D_CASHE];
 
-uint8_t fetchOperand(string code, size_t& index){//Gets the next 1 or 2 bytes from memory
-    if (index + 2 < code.length()) {
-        index += 2;
-        string hexByte = code.substr(index, 2);
-        return (uint8_t)stoul(hexByte, nullptr, 16);
-    }
+int program_load(){
+    char* test_bcode_path = "test_program.bcd";
+    uint8_t test_program[] = { //with bcode syntax
+        //.loader(
+        0x11, 0x00, 0x00, 0x0d,
+        0xa0, 0x00,
+        //#entry loop
+        //)
+        //.loop(
+        0x08,
+        0xb0,
+        0xa3,
+        0xfe,
+        0x09, 0x0a, //loop check, jump
+        0xff,
+        //)
+        //<data>(
+        0x01
+        //)
+    };
+    if(test_bcode_path == nullptr){
+        printf("No test program path provided, loading default test program\n");
+        size_t program_size = sizeof(test_program);
+        for(size_t i = 0; i < program_size; ++i){
+            ram[i] = test_program[i];
+        };
+    }else{
+          printf("Loading test program from %s //later\n", test_bcode_path);
+    };
+    return 0;
+};
+
+void crash(){
+    exit(-1);
+}
+
+int d_cashe_load(uint32_t addr){
+    printf("%u\n", addr);
+    if(addr + D_CASHE > RAM) crash();
+    for(size_t i = 0; i < D_CASHE; ++i){
+        d_cashe[i] = ram[addr + i];
+        if(!d_cashe[i] == 0){
+            printf("d/%u\n", d_cashe[i]);
+        };
+    };
+    return 0;
+};
+
+int i_cashe_load(uint32_t addr){
+    printf("%u\n", addr);
+    if(addr + I_CASHE > RAM) crash();
+    for(size_t i = 0; i < I_CASHE; ++i){
+        i_cashe[i] = ram[addr + i];
+    };
+    return 0;
+};
+
+int cashe_reset(uint8_t res_val){
+    for(size_t i = 0; i < D_CASHE; ++i){
+        d_cashe[i] = res_val;
+    };
+    for(size_t i = 0; i < I_CASHE; ++i){
+        i_cashe[i] = res_val;
+    };
     return 0;
 }
 
-class Bus{
-public:
-    array<uint8_t, 64 * 1024> cache; //64KB of cashe
-    Bus(){ cache.fill(0);}
-    void write(uint16_t addr, uint8_t data){ cache[addr] = data;}
-    uint8_t read(uint16_t addr){ return cache[addr];}
+int d_cashe_save(uint32_t addr){
+    for(size_t i = 0; i < D_CASHE; ++i){
+    ram[addr + i] = d_cashe[i];
+    };
+    return 0;
 };
 
-static array<Bus, 16> busses; //~1Mb 
-static Bus* activeBus = &busses[0];
-
-uint8_t fetchNextByte(){return activeBus->read(pc++);}
-
-struct instruction{
-    string_view hex;
-    string_view mnemonic;
-    void (*action)();
+uint32_t Get_bytes_3(){
+    ++pc;
+    uint8_t high = i_cashe[pc];
+    ++pc;
+    uint8_t med = i_cashe[pc];
+    ++pc;
+    uint8_t low = i_cashe[pc];
+    return ((uint32_t)high << 16) | ((uint32_t)med << 8) | low;
 };
 
-void jmp(){uint16_t high = fetchNextByte();uint16_t low = fetchNextByte();pc = (high << 8)|low;}
-void add(){rgC = rgA + rgB;}
-void min(){rgC = rgA - rgB;}
-void mul(){rgC = rgA * rgB;}
-void div(){rgC = rgA / rgB;}
-void sab(){swap(rgA, rgB);}
-void sac(){swap(rgA, rgC);}
-void cca(){rgB = rgC;}
-void ams(){uint16_t addr = (fetchNextByte() << 8)|fetchNextByte();activeBus->write(addr, rgA);}
-void aml(){uint16_t addr = (fetchNextByte() << 8)|fetchNextByte();rgA = activeBus->read(addr);}
-void lb0(){activeBus = &busses[0];cout << "(lb0)" << endl;}
-void lb1(){activeBus = &busses[1];cout << "(lb1)" << endl;}
-void lb2(){activeBus = &busses[2];cout << "(lb2)" << endl;}
-void ldc(){cout << "(ldc)" << endl;}
-void err(){cout << "FE(Invalid code)" << endl;}
-void ext(){cout << "(Exited with code 255[Executed code])" << endl; exit(255);}
+uint16_t Get_bytes_2(){
+    ++pc;
+    uint8_t high = i_cashe[pc];
+    ++pc;
+    uint8_t low = i_cashe[pc];
+    return (((uint16_t)high << 8) | low);
+};
 
-static constexpr array<instruction, 16> instructions{{ //Table used for adding more instructions in the future. Feel free to modyfy this table, but remember that your emulated code can break.
-    
-    {"0F", "jmp", &jmp}, //Jumps to the address in next 2 memory positions
-    {"10", "add", &add}, //Adds registor A and B, into registor 2(A + B = C)
-    {"11", "min", &min}, //Subtracts registor A and B, into registor 2(A - B = C)
-    {"12", "mul", &mul}, //Multiplies registor A and B, into registor 2(A * B = C)
-    {"13", "div", &div}, //Divides registor A and B, into registor 2(A / B = C)
-    {"14", "sab", &sab}, //Swaps registor A and B(A <-> B)
-    {"15", "div", &sac}, //Swaps registor A and C(A <-> C)
-    {"16", "ccb", &cca}, //Clones registor C into B(C -> B)
-    {"17", "ams", &ams}, //Saves registor A into current bus{adress}
-    {"18", "aml", &aml}, //Loads into registor A from current bus{adress}
-    {"B0", "lb0", &lb0}, //Change to bus 0
-    {"B1", "lb1", &lb1}, //Change to bus 1
-    {"B2", "lb2", &lb2}, //Change to bus 2
-    {"FD", "ldc", &ldc}, //Load data from disk to {bus, position}
-    {"FE", "err", &err}, //Error, invalid code (can be included for messing with people)
-    {"FF", "ext", &ext}, //Exit
-}};
-
-void executecode(string Tcur){
-    bool found = false;
-    for(const auto& inst : instructions){
-        if (Tcur == inst.hex){
-            inst.action();
-            found = true;
-            break;
-        }
-    }
-    if(!found) err();
-}
-
-void LRram(string code){
-    uint16_t loadAddr = 0;
-    try {for(size_t i = 0;i < code.length();i += 2){
-            string part = code.substr(i, 2);
-            activeBus->write(loadAddr++, (uint8_t)stoul(part, nullptr, 16));
-        } 
-    } catch(...){cout << "(Error: Input contains non-hex characters)" << endl;return;}
-    pc = 0;
-    while(pc < loadAddr){
-        uint8_t byte = fetchNextByte();
-        if (byte == 0xFF) { ext(); break;}
-        char hexstr[3];
-        sprintf(hexstr, "%02X", byte);
-        executecode(hexstr);
-    }
-}
-
-void step(){ //Used for jumping. DO NO MODIFY THIS FUNCTION
-    uint8_t byte = activeBus->read(pc);
-    char hexstr[3];
-    sprintf(hexstr, "%02X", byte);
-    string opcode = hexstr;
-    executecode(hexstr);
-}
-
-void TerminalF(){
+int emulator(){
+    program_load();
+    cashe_reset(0);
+    i_cashe_load(0);
     while(true){
-        getline(cin, Terminal); // Allows spaces in input
-        Terminal.erase(remove(Terminal.begin(), Terminal.end(), ' '), Terminal.end());
-        if(Terminal.empty()) continue;
-        if(Terminal.length() % 2 == 0){
-            transform(Terminal.begin(), Terminal.end(), Terminal.begin(), ::toupper);
-            LRram(Terminal);
-        } else{
-            cout << "(Invalid syntax: Must be even number of hex characters)" << endl;
-        }
-    }
-}
+        switch(i_cashe[pc]){
+            case 0x07:{
+            pc = Get_bytes_2();
+                --pc;
+                break;
+            };
+            case 0x08:{
+                lpc = pc;
+                printf("lsp %u\n", lpc);
+                break;
+            };
+            case 0x09:{
+                ++pc;
+                uint8_t t = i_cashe[pc];
+                printf("%u\n", t);
+                if(t != rC){
+                    pc = lpc;
+                    --pc;
+                    printf("lop fail rC = %u /=/ %u\n", t, rC);
+                }else{
+                    printf("lop pass -> rC = %u\n", t);
+                };
+                break;
+            };
+            case 0x10:{
+                printf("icl ");
+                i_cashe_load(Get_bytes_3());
+                break;
+            };
+            case 0x11:{
+                printf("dcl ");
+                d_cashe_load(Get_bytes_3());
+                break;
+            };
+            case 0x12:{
+                break;
+            };
+            case 0xa0:{
+                ++pc;
+                rA = d_cashe[i_cashe[pc]];
+                printf("lra %u\n", rA);
+                break;
+            };
+            case 0xa1:{
+                ++pc;
+                rB = d_cashe[i_cashe[pc]];
+                printf("lrb %u\n", rB);
+                break;
+            };
+            case 0xa2:{
+                rA ^= rB;
+                rB ^= rA;
+                rA ^= rB;
+                printf("swp\nrA %u\nrB %u\n", rA, rB);
+                break;
+            };
+            case 0xa3:{
+                printf("crc\n");
+                rB = rC;
+                break;
+            };
+            case 0xb0:{
+                rC = rA + rB;
+                printf("add %u\n", rC);
+                break;
+            };
+            case 0xb1:{
+                printf("min\n");
+                rC = rA - rB;
+                break;
+            };
+            case 0xb2:{
+                printf("mul\n");
+                rC = rA * rB;
+                break;
+            };
+            case 0xb3:{
+                printf("diw\n");
+                rC = rA / rB;
+                break;
+            };
+            case 0xfe:{
+                printf("rC= %u\n", rC);
+                break;
+            };
+            case 0xff:{
+                printf("ext\n");
+                return 0;
+                break;
+            };
+        
+        };
+        ++pc;
+        printf("pc %u\n", pc);
+        getchar();
+    };
+};
 
 int main(){
-    cout << "(Messages like this are generated by the emulator.)" << endl;
-    TerminalF();
+    emulator();
     return 0;
-}
+};
